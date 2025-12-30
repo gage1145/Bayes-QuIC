@@ -1,6 +1,6 @@
 library(priogenapi)
 library(tidyverse)
-library(MASS)
+library(poolr)
 
 
 
@@ -8,52 +8,79 @@ key <- Sys.getenv("PRILIM_API_KEY")
 data <- call_api(key, "results")
 
 data1 <- data %>%
-  # filter(!(sample %in% c("N", "P"))) %>%
-  select(sample, rxn_type, MPR, MS, RAF, TtT) %>%
-  mutate(
-    MPR_crossed = MPR > 3,
-    MS_crossed = MS > 0.3
-  ) %>%
+  dplyr::select(sample, rxn_type, MPR, MS, RAF, TtT) %>%
   mutate_at(c("MPR", "MS", "RAF", "TtT"), as.numeric)
+
+threshold <- 5
 
 data_sum <- data1 %>%
   group_by(sample, rxn_type) %>%
   summarize(
     mean_MPR = mean(MPR),
     median_MPR = median(MPR),
-    # mean_MS  = mean(MS),
-    MPR_positive = median_MPR > 5,
-    # MS_positive = mean(MS_crossed) > 0.25,
-    # positive = as.numeric(MPR_positive & MS_positive)
-  ) %>%
-  mutate_at(c("MPR_positive"), as.numeric)
+    positive = median_MPR > threshold,
+  )
 
-data1 <- left_join(data1, data_sum)
+data2 <- left_join(data1, data_sum)
 
 
 # Nano-QuIC probabilities
-nano_sum <- filter(data_sum, rxn_type == "Nano-QuIC")
-nano_num_pos <- length(nano_sum$MPR_positive[which(nano_sum$MPR_positive == 1)])
-prior_prob <- nano_num_pos / nrow(nano_sum)
 
-nano_df <- data1 %>%
+observation <- 5
+
+nano_df <- data2 %>%
   filter(rxn_type == "Nano-QuIC")
 
-mod <- glm(MPR_positive ~ MPR, data=nano_df, family="binomial")
-mod_sum <- summary(mod)
-# plot(mod)
+# P(B|A)
+num_pos <- nrow(nano_df[which(nano_df$positive),])
+true_pos <- nrow(nano_df[which(nano_df$positive & nano_df$MPR > observation),])
+# likelihood <- true_pos / num_pos
+# 
+# # P(A)
+prior_prob <- length(nano_df$positive[which(nano_df$positive)]) / nrow(nano_df)
+# 
+# # P(B)
+# evidence <- nrow(nano_df[which(nano_df$MPR > observation),]) / nrow(nano_df)
+# 
+# # P(A|B)
+# posterior <- likelihood * prior_prob / evidence
 
-predictions <- predict.glm(mod, nano_df, type="response")
 
-fit_ln <- fitdistrplus::fitdist(nano_df$MPR, "lnorm")
+likelihoods <- sapply(
+  nano_df$MPR, 
+  function(x) nrow(nano_df[which(nano_df$positive & nano_df$MPR > x),]) / num_pos
+)
 
-mu <- fit_ln$estimate["meanlog"]
-sigma <- fit_ln$estimate["sdlog"]
+evidences <- sapply(
+  nano_df$MPR,
+  function(x) nrow(nano_df[which(nano_df$MPR > x),]) / nrow(nano_df)
+)
+
+nano_df_result <- nano_df %>%
+  mutate(
+    likelihood = likelihoods,
+    prior_prob = prior_prob,
+    evidence   = evidences,
+    posterior  = (likelihood * prior_prob) / evidence
+  )
+
+nano_result_sum <- nano_df_result %>%
+  group_by(sample) %>%
+  summarize(
+    mean_MPR   = median(MPR),
+    likelihood = fisher(likelihood)$p,
+    prior_prob = fisher(prior_prob)$p,
+    evidence   = fisher(evidence)$p,
+    posterior  = (likelihood * prior_prob) / evidence
+  )
 
 
 
-nano_df <- nano_df %>%
-  mutate(evidence = 1 - pnorm(log(MPR), mu, sigma))
+
+# mod <- glm(positive ~ MPR, data=nano_df, family="binomial")
+# mod_sum <- summary(mod)
+# 
+# evidence <- predict.glm(mod, nano_df, type="response")
 
 
 
@@ -64,6 +91,7 @@ nano_df <- nano_df %>%
 
 
 nano_df %>%
-  ggplot(aes(MPR, MPR_positive)) +
+  mutate(positive = as.integer(positive)) %>%
+  ggplot(aes(MPR, positive)) +
   geom_point() +
   geom_smooth(method="glm", method.args = list(family="binomial"))
